@@ -5,9 +5,12 @@
 #   * master                      -> -Dblas=openblas               (EXPECTED FAIL)
 #   * feature/blas-symbol-suffix  -> -Dblas=openblas -Dblas_symbol_suffix=64_ (EXPECTED BUILD)
 #
-# Unlike the earlier conda demo, this exposes the conda prefix the way blaspp's
-# own error message asks for -- via $CPATH / $LIBRARY_PATH / $LD_LIBRARY_PATH --
-# so the OpenBLAS search probe can actually resolve -lopenblas64_.
+# Uses the conda-forge compiler toolchain (cxx-compiler -> $CXX) so the conda
+# OpenBLAS and its transitive deps (libgfortran/libgomp/libquadmath) resolve
+# cleanly -- matching how the conda-forge blaspp feedstock actually builds.
+# A first run with system g++ failed to link even a full-path libopenblas64_.so
+# (unresolved conda transitive deps), which is a toolchain mismatch, not a
+# defect in PR #129.
 name: PR #129 build-ability vs master (conda-forge ILP64 OpenBLAS)
 
 on:
@@ -44,23 +47,41 @@ jobs:
           channel-priority: strict
           activate-environment: ilp64
 
-      - name: Install ILP64 OpenBLAS from conda-forge
-        run: conda install -y libopenblas-ilp64 cmake
+      - name: Install ILP64 OpenBLAS + conda compiler toolchain
+        run: conda install -y libopenblas-ilp64 cmake cxx-compiler
 
-      - name: Diagnose + expose the conda prefix to the toolchain
+      - name: Diagnose + direct-link probe (ground-truth linker error)
         run: |
-          echo "::group::openblas libraries in the conda prefix"
-          ls -l "$CONDA_PREFIX"/lib/libopenblas* || true
+          echo "CXX=$CXX"; "$CXX" --version | head -1
+          echo "::group::openblas + gfortran libraries in the conda prefix"
+          ls -l "$CONDA_PREFIX"/lib/libopenblas64_* "$CONDA_PREFIX"/lib/libgfortran* 2>&1 || true
           echo "::endgroup::"
-          echo "Unversioned .so symlink (needed for -lopenblas64_):"
-          ls -l "$CONDA_PREFIX"/lib/libopenblas64_.so 2>&1 || echo "  MISSING"
+
           LIB=$(readlink -f "$CONDA_PREFIX"/lib/libopenblas64_.so 2>/dev/null \
                 || ls "$CONDA_PREFIX"/lib/libopenblas64_.so.* 2>/dev/null | head -1)
           echo "Resolved ILP64 library: $LIB"
+
+          echo "::group::NEEDED (transitive deps) of libopenblas64_"
+          objdump -p "$LIB" 2>/dev/null | grep NEEDED || true
+          echo "::endgroup::"
+
           echo "::group::Symbols (expect suffixed dgemm_64_)"
           nm -D --defined-only "$LIB" 2>/dev/null | grep -iE 'dgemm' | head -10 || true
           echo "::endgroup::"
-          # Expose to all later steps the way blaspp's error message prescribes.
+
+          # Expose conda's libs to the toolchain (as blaspp's error prescribes).
+          export CPATH="$CONDA_PREFIX/include"
+          export LIBRARY_PATH="$CONDA_PREFIX/lib"
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+          echo "::group::Direct link with conda \$CXX (the real error, if any)"
+          printf 'int main(){return 0;}\n' > /tmp/h.cc
+          echo "--- search: \$CXX h.cc -lopenblas64_ ---"
+          "$CXX" /tmp/h.cc -lopenblas64_ -o /tmp/h;  echo "exit=$?"
+          echo "--- full path: \$CXX h.cc \$LIB ---"
+          "$CXX" /tmp/h.cc "$LIB"        -o /tmp/h2; echo "exit=$?"
+          echo "::endgroup::"
+
           {
             echo "LIB=$LIB"
             echo "CPATH=$CONDA_PREFIX/include"
@@ -72,13 +93,14 @@ jobs:
         run: |
           set -o pipefail
           cmake -B build-master -S blaspp-master \
+            -DCMAKE_CXX_COMPILER="$CXX" \
             -Dblas=openblas \
             -Dblas_int="int64_t (ILP64)" \
             -Dbuild_tests=OFF \
             --log-level=DEBUG 2>&1 | tee configure-master.log || true
           echo "==================== VERDICT (master) ===================="
           if grep -q "requires a BLAS library and none was found" configure-master.log; then
-            echo "CONFIRMED: master cannot build against conda's libopenblas64_."
+            echo "CONFIRMED: master cannot auto-detect conda's libopenblas64_."
           else
             echo "NOTE: master did NOT fail as expected — inspect the log."
           fi
@@ -86,7 +108,10 @@ jobs:
       - name: "PR #129 — blas_symbol_suffix=64_ (search) — EXPECTED TO BUILD"
         run: |
           set -o pipefail
+          RPATH="-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib -Wl,-rpath-link,$CONDA_PREFIX/lib"
           cmake -B build-pr129 -S blaspp-pr129 \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
             -Dblas=openblas \
             -Dblas_int="int64_t (ILP64)" \
             -Dblas_symbol_suffix=64_ \
@@ -100,9 +125,9 @@ jobs:
             cmake --build build-pr129 -j 2>&1 | tee build-pr129.log | tail -20 || true
           else
             echo "Search-based configure did not find BLAS; trying explicit BLAS_LIBRARIES fallback..."
-            # Fallback proves the suffix *mangling* works even if the search name
-            # doesn't resolve (e.g. no unversioned .so symlink).
             cmake -B build-pr129-explicit -S blaspp-pr129 \
+              -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
               -DBLAS_LIBRARIES="$LIB" \
               -Dblas_int="int64_t (ILP64)" \
               -Dblas_symbol_suffix=64_ \
