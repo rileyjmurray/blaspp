@@ -47,9 +47,9 @@ jobs:
             echo "================================================================"
           } > 01-apt-master-FAILS.log
           cmake -B b01 -S blaspp-master -Dblas=openblas -Dblas_int="int64_t (ILP64)" \
-            -Dbuild_tests=OFF -Dcolor=OFF >> 01-apt-master-FAILS.log 2>&1
+            -Dbuild_tests=OFF -Dcolor=OFF >> 01-apt-master-FAILS.log 2>&1; rc=$?
           echo "----------------------------------------------------------------" >> 01-apt-master-FAILS.log
-          echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 01-apt-master-FAILS.log
+          echo "cmake exit code: $rc  (non-zero = configure failed, as claimed)"  >> 01-apt-master-FAILS.log
 
       - name: "02 — master + apt, library by path (EXPECT BUILD)"
         run: |
@@ -90,9 +90,9 @@ jobs:
           } > 03-conda-master-FAILS.log
           cmake -B b03 -S blaspp-master -DCMAKE_CXX_COMPILER="$CXX" \
             -Dblas=openblas -Dblas_int="int64_t (ILP64)" \
-            -Dbuild_tests=OFF -Dcolor=OFF >> 03-conda-master-FAILS.log 2>&1
+            -Dbuild_tests=OFF -Dcolor=OFF >> 03-conda-master-FAILS.log 2>&1; rc=$?
           echo "----------------------------------------------------------------" >> 03-conda-master-FAILS.log
-          echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 03-conda-master-FAILS.log
+          echo "cmake exit code: $rc  (non-zero = configure failed, as claimed)"  >> 03-conda-master-FAILS.log
 
       - name: "04 — master + conda, BLAS_LIBRARIES set correctly (EXPECT FAIL: symbol suffix)"
         run: |
@@ -111,9 +111,9 @@ jobs:
           } > 04-conda-bylib-master-FAILS.log
           cmake -B b04 -S blaspp-master -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
             -DBLAS_LIBRARIES="$LIBC" -Dblas_int="int64_t (ILP64)" \
-            -Dbuild_tests=OFF -Dcolor=OFF >> 04-conda-bylib-master-FAILS.log 2>&1
+            -Dbuild_tests=OFF -Dcolor=OFF >> 04-conda-bylib-master-FAILS.log 2>&1; rc=$?
           echo "----------------------------------------------------------------" >> 04-conda-bylib-master-FAILS.log
-          echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 04-conda-bylib-master-FAILS.log
+          echo "cmake exit code: $rc  (non-zero = configure failed, as claimed)"  >> 04-conda-bylib-master-FAILS.log
 
       - name: "05 — PR #129 + conda, blas_symbol_suffix=64_ (EXPECT BUILD)"
         run: |
