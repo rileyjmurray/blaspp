@@ -1,13 +1,16 @@
-# Produces four self-describing logs for the ILP64-OpenBLAS issue, each backing
-# exactly one claim and ending in either a FATAL_ERROR or `Built target blaspp`:
+# Produces seven self-describing logs for the ILP64-OpenBLAS issue, each backing
+# exactly one claim. CMake (01-05) end in a FATAL_ERROR or `Built target blaspp`;
+# the Make/configure.py logs (06-07) end in a non-zero configure.py exit.
 #
-#   01-apt-master-FAILS.log         master + apt libopenblas64-dev, auto-detect  -> FAILS
-#   02-apt-bylib-WORKS.log          master + apt, library given by path           -> BUILDS
-#   03-conda-master-FAILS.log       master + conda libopenblas-ilp64, auto        -> FAILS
-#   04-conda-bylib-master-FAILS.log master + conda, BLAS_LIBRARIES set correctly  -> FAILS (suffix)
-#   05-conda-pr129-WORKS.log        PR #129 + conda, -Dblas_symbol_suffix=64_     -> BUILDS
+#   01-apt-master-FAILS.log         CMake master + apt libopenblas64-dev, auto    -> FAILS
+#   02-apt-bylib-WORKS.log          CMake master + apt, library given by path     -> BUILDS
+#   03-conda-master-FAILS.log       CMake master + conda libopenblas-ilp64, auto  -> FAILS
+#   04-conda-bylib-master-FAILS.log CMake master + conda, BLAS_LIBRARIES correct  -> FAILS (suffix)
+#   05-conda-pr129-WORKS.log        CMake PR #129 + conda, blas_symbol_suffix=64_ -> BUILDS
+#   06-make-apt-configure-FAILS.log Make configure.py + apt libopenblas64-dev     -> FAILS
+#   07-make-conda-configure-FAILS.log Make configure.py + conda libopenblas-ilp64 -> FAILS
 #
-# All configures pass -Dcolor=OFF so the logs are plain text (no ANSI codes).
+# CMake configures pass -Dcolor=OFF so the logs are plain text (no ANSI codes).
 name: ILP64 OpenBLAS evidence
 
 on:
@@ -69,6 +72,23 @@ jobs:
           cmake --build b02 -j >> 02-apt-bylib-WORKS.log 2>&1
           echo "----------------------------------------------------------------" >> 02-apt-bylib-WORKS.log
           ls b02/lib*blaspp* >> 02-apt-bylib-WORKS.log 2>&1
+
+      - name: "06 — Make build + apt, configure.py auto-detect (EXPECT FAIL)"
+        run: |
+          set +e
+          LOG="$GITHUB_WORKSPACE/06-make-apt-configure-FAILS.log"
+          {
+            echo "CLAIM 6: The limitation is NOT CMake-specific. blaspp's Make/configure.py"
+            echo "         build detects BLAS in config/lapack.py, which also hardcodes -lopenblas"
+            echo "         (line 321), so it can't auto-detect Ubuntu's ILP64 OpenBLAS either."
+            echo "ENV    : stock ubuntu-latest, apt libopenblas64-dev only, system g++."
+            echo "RUN    : python3 configure.py blas=openblas blas_int=int64  (blaspp master, Make build)"
+            echo "EXPECT : 'none found' / 'BLAS++ could not be configured', non-zero exit."
+            echo "================================================================"
+          } > "$LOG"
+          ( cd blaspp-master && python3 configure.py blas=openblas blas_int=int64 ) >> "$LOG" 2>&1; rc=$?
+          echo "----------------------------------------------------------------" >> "$LOG"
+          echo "configure.py exit code: $rc  (non-zero = configure failed, as claimed)" >> "$LOG"
 
       # -------------------------------------------------------------- conda
       - name: Set up conda-forge
@@ -139,12 +159,30 @@ jobs:
           echo "----------------------------------------------------------------" >> 05-conda-pr129-WORKS.log
           ls b05/lib*blaspp* >> 05-conda-pr129-WORKS.log 2>&1
 
+      - name: "07 — Make build + conda, configure.py auto-detect (EXPECT FAIL)"
+        run: |
+          set +e
+          export CXX="$CXX" CPATH="$CONDA_PREFIX/include" LIBRARY_PATH="$CONDA_PREFIX/lib" LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          LOG="$GITHUB_WORKSPACE/07-make-conda-configure-FAILS.log"
+          {
+            echo "CLAIM 7: The Make build also can't auto-detect conda-forge's ILP64 OpenBLAS."
+            echo "ENV    : conda-forge libopenblas-ilp64 (libopenblas64_, dgemm_64_), conda g++."
+            echo "RUN    : python3 configure.py blas=openblas blas_int=int64  (blaspp master, Make build)"
+            echo "EXPECT : 'none found' / 'BLAS++ could not be configured', non-zero exit."
+            echo "NOTE   : config/lapack.py has no symbol-suffix option and PR #129 did not touch"
+            echo "         the Make build, so even forcing the lib would mangle to dgemm_ and fail."
+            echo "================================================================"
+          } > "$LOG"
+          ( cd blaspp-master && python3 configure.py blas=openblas blas_int=int64 ) >> "$LOG" 2>&1; rc=$?
+          echo "----------------------------------------------------------------" >> "$LOG"
+          echo "configure.py exit code: $rc  (non-zero = configure failed, as claimed)" >> "$LOG"
+
       - name: Summary (console pass/fail at a glance)
         if: always()
         run: |
-          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-bylib-master-FAILS 05-conda-pr129-WORKS; do
+          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-bylib-master-FAILS 05-conda-pr129-WORKS 06-make-apt-configure-FAILS 07-make-conda-configure-FAILS; do
             echo "===== $f.log ====="
-            grep -E "requires a BLAS library and none was found|routine not found|Built target blaspp|Found BLAS library" "$f.log" || echo "(marker not found)"
+            grep -E "requires a BLAS library and none was found|routine not found|could not be configured|none found|Built target blaspp|Found BLAS library" "$f.log" || echo "(marker not found)"
           done
 
       - name: Upload the four evidence logs
@@ -158,4 +196,6 @@ jobs:
             03-conda-master-FAILS.log
             04-conda-bylib-master-FAILS.log
             05-conda-pr129-WORKS.log
+            06-make-apt-configure-FAILS.log
+            07-make-conda-configure-FAILS.log
           if-no-files-found: warn
