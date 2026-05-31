@@ -13,6 +13,9 @@ name: ILP64 OpenBLAS (libopenblas64-dev) demo
 
 on:
   workflow_dispatch:
+  push:
+    branches: [demo/ilp64-openblas64]
+    paths: ['.github/workflows/ilp64-openblas64-demo.yml']
 
 jobs:
   demo:
