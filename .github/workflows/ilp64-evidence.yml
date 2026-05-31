@@ -1,10 +1,11 @@
 # Produces four self-describing logs for the ILP64-OpenBLAS issue, each backing
 # exactly one claim and ending in either a FATAL_ERROR or `Built target blaspp`:
 #
-#   01-apt-master-FAILS.log    master + apt libopenblas64-dev, auto-detect -> FAILS
-#   02-apt-bylib-WORKS.log     master + apt, library given by path          -> BUILDS
-#   03-conda-master-FAILS.log  master + conda libopenblas-ilp64, auto       -> FAILS
-#   04-conda-pr129-WORKS.log   PR #129 + conda, -Dblas_symbol_suffix=64_    -> BUILDS
+#   01-apt-master-FAILS.log         master + apt libopenblas64-dev, auto-detect  -> FAILS
+#   02-apt-bylib-WORKS.log          master + apt, library given by path           -> BUILDS
+#   03-conda-master-FAILS.log       master + conda libopenblas-ilp64, auto        -> FAILS
+#   04-conda-bylib-master-FAILS.log master + conda, BLAS_LIBRARIES set correctly  -> FAILS (suffix)
+#   05-conda-pr129-WORKS.log        PR #129 + conda, -Dblas_symbol_suffix=64_     -> BUILDS
 #
 # All configures pass -Dcolor=OFF so the logs are plain text (no ANSI codes).
 name: ILP64 OpenBLAS evidence
@@ -93,7 +94,28 @@ jobs:
           echo "----------------------------------------------------------------" >> 03-conda-master-FAILS.log
           echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 03-conda-master-FAILS.log
 
-      - name: "04 — PR #129 + conda, blas_symbol_suffix=64_ (EXPECT BUILD)"
+      - name: "04 — master + conda, BLAS_LIBRARIES set correctly (EXPECT FAIL: symbol suffix)"
+        run: |
+          set +e
+          export CPATH="$CONDA_PREFIX/include" LIBRARY_PATH="$CONDA_PREFIX/lib" LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          RPATH="-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib -Wl,-rpath-link,$CONDA_PREFIX/lib"
+          LIBC="$CONDA_PREFIX/lib/libopenblas64_.so.0"
+          {
+            echo "CLAIM 4: Unlike apt (claim 2), pointing master at conda's ILP64 OpenBLAS"
+            echo "         by path does NOT work — so there is no blaspp-free workaround."
+            echo "ENV    : conda-forge libopenblas-ilp64 (symbols are dgemm_64_), conda g++."
+            echo "RUN    : cmake -DBLAS_LIBRARIES=$LIBC -Dblas_int='int64_t (ILP64)'  (blaspp master)"
+            echo "EXPECT : FAIL — master mangles to dgemm_, but the library only exports"
+            echo "         dgemm_64_, so the BLAS routine probe doesn't link ('routine not found')."
+            echo "================================================================"
+          } > 04-conda-bylib-master-FAILS.log
+          cmake -B b04 -S blaspp-master -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
+            -DBLAS_LIBRARIES="$LIBC" -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF -Dcolor=OFF >> 04-conda-bylib-master-FAILS.log 2>&1
+          echo "----------------------------------------------------------------" >> 04-conda-bylib-master-FAILS.log
+          echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 04-conda-bylib-master-FAILS.log
+
+      - name: "05 — PR #129 + conda, blas_symbol_suffix=64_ (EXPECT BUILD)"
         run: |
           set +e
           # conda's runtime libopenblas-ilp64 ships only libopenblas64_.so.0; a
@@ -103,26 +125,26 @@ jobs:
           export CPATH="$CONDA_PREFIX/include" LIBRARY_PATH="$CONDA_PREFIX/lib" LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
           RPATH="-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib -Wl,-rpath-link,$CONDA_PREFIX/lib"
           {
-            echo "CLAIM 4: PR #129's blas_symbol_suffix=64_ lets the SAME auto-detect"
+            echo "CLAIM 5: PR #129's blas_symbol_suffix=64_ lets the SAME auto-detect"
             echo "         invocation find and BUILD against conda-forge's libopenblas64_."
             echo "ENV    : conda-forge libopenblas-ilp64, conda g++ (dev .so symlink recreated)."
             echo "RUN    : cmake -Dblas=openblas -Dblas_int='int64_t (ILP64)' -Dblas_symbol_suffix=64_  (PR #129)"
             echo "EXPECT : Found BLAS library: -lopenblas64_, then [100%] Built target blaspp."
             echo "================================================================"
-          } > 04-conda-pr129-WORKS.log
-          cmake -B b04 -S blaspp-pr129 -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
+          } > 05-conda-pr129-WORKS.log
+          cmake -B b05 -S blaspp-pr129 -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
             -Dblas=openblas -Dblas_int="int64_t (ILP64)" -Dblas_symbol_suffix=64_ \
-            -Dbuild_tests=OFF -Dcolor=OFF >> 04-conda-pr129-WORKS.log 2>&1
-          cmake --build b04 -j >> 04-conda-pr129-WORKS.log 2>&1
-          echo "----------------------------------------------------------------" >> 04-conda-pr129-WORKS.log
-          ls b04/lib*blaspp* >> 04-conda-pr129-WORKS.log 2>&1
+            -Dbuild_tests=OFF -Dcolor=OFF >> 05-conda-pr129-WORKS.log 2>&1
+          cmake --build b05 -j >> 05-conda-pr129-WORKS.log 2>&1
+          echo "----------------------------------------------------------------" >> 05-conda-pr129-WORKS.log
+          ls b05/lib*blaspp* >> 05-conda-pr129-WORKS.log 2>&1
 
       - name: Summary (console pass/fail at a glance)
         if: always()
         run: |
-          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-pr129-WORKS; do
+          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-bylib-master-FAILS 05-conda-pr129-WORKS; do
             echo "===== $f.log ====="
-            grep -E "requires a BLAS library and none was found|Built target blaspp|Found BLAS library" "$f.log" || echo "(marker not found)"
+            grep -E "requires a BLAS library and none was found|routine not found|Built target blaspp|Found BLAS library" "$f.log" || echo "(marker not found)"
           done
 
       - name: Upload the four evidence logs
@@ -134,5 +156,6 @@ jobs:
             01-apt-master-FAILS.log
             02-apt-bylib-WORKS.log
             03-conda-master-FAILS.log
-            04-conda-pr129-WORKS.log
+            04-conda-bylib-master-FAILS.log
+            05-conda-pr129-WORKS.log
           if-no-files-found: warn
