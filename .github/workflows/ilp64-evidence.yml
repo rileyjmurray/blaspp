@@ -1,0 +1,138 @@
+# Produces four self-describing logs for the ILP64-OpenBLAS issue, each backing
+# exactly one claim and ending in either a FATAL_ERROR or `Built target blaspp`:
+#
+#   01-apt-master-FAILS.log    master + apt libopenblas64-dev, auto-detect -> FAILS
+#   02-apt-bylib-WORKS.log     master + apt, library given by path          -> BUILDS
+#   03-conda-master-FAILS.log  master + conda libopenblas-ilp64, auto       -> FAILS
+#   04-conda-pr129-WORKS.log   PR #129 + conda, -Dblas_symbol_suffix=64_    -> BUILDS
+#
+# All configures pass -Dcolor=OFF so the logs are plain text (no ANSI codes).
+name: ILP64 OpenBLAS evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [demo/ilp64-openblas64]
+    paths: ['.github/workflows/ilp64-evidence.yml']
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master into ./blaspp-master
+        uses: actions/checkout@v4
+        with: { ref: master, path: blaspp-master }
+
+      - name: Checkout PR #129 branch into ./blaspp-pr129
+        uses: actions/checkout@v4
+        with: { ref: feature/blas-symbol-suffix, path: blaspp-pr129 }
+
+      # ---------------------------------------------------------------- apt
+      - name: Install apt ILP64 OpenBLAS (system toolchain)
+        run: sudo apt-get update && sudo apt-get install -y libopenblas64-dev cmake g++ binutils
+
+      - name: "01 — master + apt, auto-detect (EXPECT FAIL)"
+        run: |
+          set +e
+          {
+            echo "CLAIM 1: blaspp master cannot auto-detect Ubuntu's ILP64 OpenBLAS."
+            echo "ENV    : stock ubuntu-latest, apt libopenblas64-dev only, system g++."
+            echo "RUN    : cmake -Dblas=openblas -Dblas_int='int64_t (ILP64)'  (blaspp master)"
+            echo "EXPECT : FATAL_ERROR — only -lopenblas is probed, but the lib is libopenblas64."
+            echo "================================================================"
+          } > 01-apt-master-FAILS.log
+          cmake -B b01 -S blaspp-master -Dblas=openblas -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF -Dcolor=OFF >> 01-apt-master-FAILS.log 2>&1
+          echo "----------------------------------------------------------------" >> 01-apt-master-FAILS.log
+          echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 01-apt-master-FAILS.log
+
+      - name: "02 — master + apt, library by path (EXPECT BUILD)"
+        run: |
+          set +e
+          LIBA=$(ldconfig -p | grep -m1 'libopenblas64\.so' | awk '{print $NF}')
+          {
+            echo "CLAIM 2: The failure in claim 1 is only the hardcoded link NAME."
+            echo "         Given the same .so by path, master configures and BUILDS,"
+            echo "         which also shows Ubuntu's libopenblas64 has standard dgemm_ symbols."
+            echo "ENV    : stock ubuntu-latest, apt libopenblas64-dev only, system g++."
+            echo "RUN    : cmake -DBLAS_LIBRARIES=$LIBA -Dblas_int='int64_t (ILP64)'  (master)"
+            echo "EXPECT : configure done, then [100%] Built target blaspp."
+            echo "================================================================"
+          } > 02-apt-bylib-WORKS.log
+          cmake -B b02 -S blaspp-master -DBLAS_LIBRARIES="$LIBA" -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF -Dcolor=OFF >> 02-apt-bylib-WORKS.log 2>&1
+          cmake --build b02 -j >> 02-apt-bylib-WORKS.log 2>&1
+          echo "----------------------------------------------------------------" >> 02-apt-bylib-WORKS.log
+          ls b02/lib*blaspp* >> 02-apt-bylib-WORKS.log 2>&1
+
+      # -------------------------------------------------------------- conda
+      - name: Set up conda-forge
+        uses: conda-incubator/setup-miniconda@v3
+        with: { miniforge-version: latest, channels: conda-forge, channel-priority: strict, activate-environment: ilp64 }
+
+      - name: Install conda ILP64 OpenBLAS + conda toolchain
+        run: conda install -y libopenblas-ilp64 cmake cxx-compiler
+
+      - name: "03 — master + conda, auto-detect (EXPECT FAIL)"
+        run: |
+          set +e
+          {
+            echo "CLAIM 3: blaspp master also cannot auto-detect conda-forge's ILP64 OpenBLAS."
+            echo "ENV    : conda-forge libopenblas-ilp64 (libopenblas64_, symbols dgemm_64_), conda g++."
+            echo "RUN    : cmake -Dblas=openblas -Dblas_int='int64_t (ILP64)'  (blaspp master)"
+            echo "EXPECT : FATAL_ERROR — only -lopenblas is probed."
+            echo "================================================================"
+          } > 03-conda-master-FAILS.log
+          cmake -B b03 -S blaspp-master -DCMAKE_CXX_COMPILER="$CXX" \
+            -Dblas=openblas -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF -Dcolor=OFF >> 03-conda-master-FAILS.log 2>&1
+          echo "----------------------------------------------------------------" >> 03-conda-master-FAILS.log
+          echo "cmake exit code: $?  (non-zero = configure failed, as claimed)"  >> 03-conda-master-FAILS.log
+
+      - name: "04 — PR #129 + conda, blas_symbol_suffix=64_ (EXPECT BUILD)"
+        run: |
+          set +e
+          # conda's runtime libopenblas-ilp64 ships only libopenblas64_.so.0; a
+          # build/dev env (e.g. the conda-forge feedstock) also has the unversioned
+          # .so that -lopenblas64_ needs, so recreate it here.
+          ln -sf libopenblas64_.so.0 "$CONDA_PREFIX/lib/libopenblas64_.so"
+          export CPATH="$CONDA_PREFIX/include" LIBRARY_PATH="$CONDA_PREFIX/lib" LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          RPATH="-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib -Wl,-rpath-link,$CONDA_PREFIX/lib"
+          {
+            echo "CLAIM 4: PR #129's blas_symbol_suffix=64_ lets the SAME auto-detect"
+            echo "         invocation find and BUILD against conda-forge's libopenblas64_."
+            echo "ENV    : conda-forge libopenblas-ilp64, conda g++ (dev .so symlink recreated)."
+            echo "RUN    : cmake -Dblas=openblas -Dblas_int='int64_t (ILP64)' -Dblas_symbol_suffix=64_  (PR #129)"
+            echo "EXPECT : Found BLAS library: -lopenblas64_, then [100%] Built target blaspp."
+            echo "================================================================"
+          } > 04-conda-pr129-WORKS.log
+          cmake -B b04 -S blaspp-pr129 -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
+            -Dblas=openblas -Dblas_int="int64_t (ILP64)" -Dblas_symbol_suffix=64_ \
+            -Dbuild_tests=OFF -Dcolor=OFF >> 04-conda-pr129-WORKS.log 2>&1
+          cmake --build b04 -j >> 04-conda-pr129-WORKS.log 2>&1
+          echo "----------------------------------------------------------------" >> 04-conda-pr129-WORKS.log
+          ls b04/lib*blaspp* >> 04-conda-pr129-WORKS.log 2>&1
+
+      - name: Summary (console pass/fail at a glance)
+        if: always()
+        run: |
+          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-pr129-WORKS; do
+            echo "===== $f.log ====="
+            grep -E "requires a BLAS library and none was found|Built target blaspp|Found BLAS library" "$f.log" || echo "(marker not found)"
+          done
+
+      - name: Upload the four evidence logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ilp64-evidence
+          path: |
+            01-apt-master-FAILS.log
+            02-apt-bylib-WORKS.log
+            03-conda-master-FAILS.log
+            04-conda-pr129-WORKS.log
+          if-no-files-found: warn
