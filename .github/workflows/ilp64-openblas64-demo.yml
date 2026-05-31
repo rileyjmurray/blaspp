@@ -1,0 +1,127 @@
+# Demonstrates that BLAS++'s CMake build system cannot use the stock
+# Debian/Ubuntu ILP64 OpenBLAS package (libopenblas64-dev) via its normal
+# automatic BLAS discovery, because BLASFinder.cmake hardcodes the link
+# names `-lopenblas` / `-lblas` and has no notion of the distro's `64`
+# library-name suffix.
+#
+# Run it from the Actions tab (workflow_dispatch). It is intentionally
+# self-contained: a stock `ubuntu-latest` runner, one apt package, and the
+# blaspp checkout this workflow lives in. The job stays green on purpose so
+# the logs/artifacts always upload; the *point* is the FATAL_ERROR that the
+# log captures during the automatic-detection configure step.
+name: ILP64 OpenBLAS (libopenblas64-dev) demo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout blaspp
+        uses: actions/checkout@v4
+
+      - name: Show runner OS
+        run: |
+          echo "::group::/etc/os-release"
+          cat /etc/os-release
+          echo "::endgroup::"
+          cmake --version
+          g++ --version | head -1
+
+      - name: Install ONLY the ILP64 OpenBLAS package
+        run: |
+          # Deliberately do NOT install libopenblas-dev (the LP64 build), so
+          # the underlying BLAS is exclusively the ILP64 libopenblas64-dev.
+          sudo apt-get update
+          sudo apt-get install -y libopenblas64-dev cmake g++ binutils
+
+      - name: Diagnose what libopenblas64-dev actually provides
+        run: |
+          echo "::group::Installed openblas packages"
+          dpkg -l | grep -i openblas || true
+          echo "::endgroup::"
+
+          echo "::group::Shared objects shipped by the openblas64 packages"
+          for p in $(dpkg -l | awk '/openblas/ {print $2}'); do
+            echo "== $p =="
+            dpkg -L "$p" | grep -E '\.so' || true
+          done
+          echo "::endgroup::"
+
+          echo "::group::ldconfig view"
+          ldconfig -p | grep -iE 'openblas|/libblas|/liblapack' || true
+          echo "::endgroup::"
+
+          # Resolve the actual ILP64 library file.
+          LIB=$(ldconfig -p | grep -i 'libopenblas64' | head -1 | awk '{print $NF}')
+          echo "Resolved ILP64 library: $LIB"
+          ls -l "$LIB" || true
+          echo "LIB=$LIB" >> "$GITHUB_ENV"
+
+          echo "::group::Symbol names (plain dgemm_ vs suffixed dgemm_64_?)"
+          # This tells us whether the package uses SYMBOLSUFFIX=64_ or not.
+          nm -D --defined-only "$LIB" 2>/dev/null | grep -iE 'dgemm' | head -20 || true
+          echo "::endgroup::"
+
+          echo "::group::Do the names BLASFinder searches for even exist?"
+          # BLASFinder probes `-lopenblas` and `-lblas`. On a libopenblas64-only
+          # box, neither link name resolves; only the `64`-suffixed names do.
+          echo 'int main(void){return 0;}' > /tmp/probe.c
+          echo "--- try: gcc ... -lopenblas (what BLASFinder's OpenBLAS probe uses) ---"
+          gcc /tmp/probe.c -lopenblas    -o /tmp/probe 2>&1 | head -5 || true
+          echo "--- try: gcc ... -lblas    (what BLASFinder's generic probe uses) ---"
+          gcc /tmp/probe.c -lblas        -o /tmp/probe 2>&1 | head -5 || true
+          echo "--- try: gcc ... -lopenblas64 (the name the distro actually ships) ---"
+          gcc /tmp/probe.c -lopenblas64  -o /tmp/probe 2>&1 | head -5 \
+            && echo "OK: -lopenblas64 links cleanly" || true
+          echo "::endgroup::"
+
+      - name: "Attempt 1 — automatic detection (the normal path) — EXPECTED TO FAIL"
+        run: |
+          # This is exactly what a user does: ask blaspp for ILP64 OpenBLAS.
+          # --log-level=DEBUG surfaces BLASFinder's candidate library list so
+          # the log shows it only ever tries `-lopenblas`, never `-lopenblas64`.
+          set -o pipefail
+          cmake -B build-auto -S . \
+            -Dblas=openblas \
+            -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF \
+            --log-level=DEBUG 2>&1 | tee configure-auto.log || true
+
+          echo "==================== VERDICT (auto) ===================="
+          if grep -q "requires a BLAS library and none was found" configure-auto.log; then
+            echo "CONFIRMED: automatic detection FAILED to find libopenblas64-dev."
+          else
+            echo "NOTE: automatic detection did NOT hit the expected failure — inspect the log."
+          fi
+          echo "--- candidate OpenBLAS link names BLASFinder considered: ---"
+          grep -iE "openblas" configure-auto.log | grep -iE "lopenblas|library list|candidate" | head -20 || true
+
+      - name: "Attempt 2 — manual BLAS_LIBRARIES=<abs path> (the likely 'just do this' workaround)"
+        run: |
+          # Pre-empts the obvious reply: yes, you can hand blaspp the absolute
+          # path. This step records whether that workaround configures + builds,
+          # so the limitation is scoped precisely to *automatic discovery*.
+          set -o pipefail
+          cmake -B build-explicit -S . \
+            -DBLAS_LIBRARIES="${LIB}" \
+            -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF 2>&1 | tee configure-explicit.log || true
+
+          echo "==================== VERDICT (explicit path) ===================="
+          if grep -qiE "BLAS_FOUND.*true|Found BLAS|BLAS_LIBRARIES" configure-explicit.log \
+             && [ -f build-explicit/CMakeCache.txt ]; then
+            echo "Explicit-path configure produced a cache; attempting a build..."
+            cmake --build build-explicit -j 2>&1 | tail -30 || true
+          fi
+
+      - name: Upload configure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blaspp-ilp64-openblas64-logs
+          path: |
+            configure-auto.log
+            configure-explicit.log
+          if-no-files-found: warn
