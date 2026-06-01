@@ -1,6 +1,7 @@
-# Produces seven self-describing logs for the ILP64-OpenBLAS issue, each backing
-# exactly one claim. CMake (01-05) end in a FATAL_ERROR or `Built target blaspp`;
-# the Make/configure.py logs (06-07) end in a non-zero configure.py exit.
+# Produces self-describing logs for the ILP64-OpenBLAS issue, each backing exactly
+# one claim. CMake (01-05) end in a FATAL_ERROR or `Built target blaspp`; the
+# Make/configure.py logs (06-07) end in a non-zero configure.py exit. 08-09 test
+# Mark's suggestion: route through CMake's own FindBLAS via BLA_VENDOR.
 #
 #   01-apt-master-FAILS.log         CMake master + apt libopenblas64-dev, auto    -> FAILS
 #   02-apt-bylib-WORKS.log          CMake master + apt, library given by path     -> BUILDS
@@ -9,6 +10,8 @@
 #   05-conda-pr129-WORKS.log        CMake PR #129 + conda, blas_symbol_suffix=64_ -> BUILDS
 #   06-make-apt-configure-FAILS.log Make configure.py + apt libopenblas64-dev     -> FAILS
 #   07-make-conda-configure-FAILS.log Make configure.py + conda libopenblas-ilp64 -> FAILS
+#   08-apt-blavendor.log            CMake master + apt, BLA_VENDOR=OpenBLAS        -> (test)
+#   09-conda-blavendor.log          CMake master + conda, BLA_VENDOR=OpenBLAS      -> (test)
 #
 # CMake configures pass -Dcolor=OFF so the logs are plain text (no ANSI codes).
 name: ILP64 OpenBLAS evidence
@@ -89,6 +92,28 @@ jobs:
           ( cd blaspp-master && python3 configure.py blas=openblas blas_int=int64 ) >> "$LOG" 2>&1; rc=$?
           echo "----------------------------------------------------------------" >> "$LOG"
           echo "configure.py exit code: $rc  (non-zero = configure failed, as claimed)" >> "$LOG"
+
+      - name: "08 — master + apt, BLA_VENDOR=OpenBLAS (Mark's suggestion)"
+        run: |
+          set +e
+          {
+            echo "CLAIM 8: Testing Mark's suggestion — does CMake's own FindBLAS (reached via"
+            echo "         BLA_VENDOR) locate Ubuntu's ILP64 OpenBLAS where blaspp's search could"
+            echo "         not (claim 1)?  Setting BLA_VENDOR routes blaspp to find_package(BLAS)."
+            echo "ENV    : stock ubuntu-latest, apt libopenblas64-dev only, system g++."
+            echo "RUN    : cmake -DBLA_VENDOR=OpenBLAS -DBLA_SIZEOF_INTEGER=8 -Dblas_int='int64_t (ILP64)'  (master)"
+            echo "         BLA_SIZEOF_INTEGER=8 asks CMake FindBLAS for the 64-bit interface (it"
+            echo "         appends a '64' library-name variant)."
+            echo "EXPECT : likely BUILDS — if FindBLAS finds -lopenblas64, apt's plain dgemm_ symbols"
+            echo "         satisfy blaspp's binding check. The apt name problem is solvable this way."
+            echo "================================================================"
+          } > 08-apt-blavendor.log
+          cmake -B b08 -S blaspp-master -DBLA_VENDOR=OpenBLAS -DBLA_SIZEOF_INTEGER=8 \
+            -Dblas_int="int64_t (ILP64)" -Dbuild_tests=OFF -Dcolor=OFF >> 08-apt-blavendor.log 2>&1; rc=$?
+          if [ $rc -eq 0 ]; then cmake --build b08 -j >> 08-apt-blavendor.log 2>&1; rc=$?; fi
+          echo "----------------------------------------------------------------" >> 08-apt-blavendor.log
+          echo "cmake exit code: $rc  (0 = configured/built; non-zero = failed)"  >> 08-apt-blavendor.log
+          ls b08/lib*blaspp* >> 08-apt-blavendor.log 2>&1
 
       # -------------------------------------------------------------- conda
       - name: Set up conda-forge
@@ -177,15 +202,41 @@ jobs:
           echo "----------------------------------------------------------------" >> "$LOG"
           echo "configure.py exit code: $rc  (non-zero = configure failed, as claimed)" >> "$LOG"
 
+      - name: "09 — master + conda, BLA_VENDOR=OpenBLAS (Mark's suggestion)"
+        run: |
+          set +e
+          # conda's runtime libopenblas-ilp64 ships only libopenblas64_.so.0; recreate
+          # the unversioned .so so CMake FindBLAS can match the name at all (see step 05).
+          ln -sf libopenblas64_.so.0 "$CONDA_PREFIX/lib/libopenblas64_.so"
+          export CPATH="$CONDA_PREFIX/include" LIBRARY_PATH="$CONDA_PREFIX/lib" LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          RPATH="-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib -Wl,-rpath-link,$CONDA_PREFIX/lib"
+          {
+            echo "CLAIM 9: BLA_VENDOR does NOT rescue the conda case. Even routed through CMake's"
+            echo "         own FindBLAS, conda's lib is libopenblas64_ exporting dgemm_64_ symbols."
+            echo "ENV    : conda-forge libopenblas-ilp64, conda g++ (dev .so symlink recreated)."
+            echo "RUN    : cmake -DBLA_VENDOR=OpenBLAS -DBLA_SIZEOF_INTEGER=8 -Dblas_int='int64_t (ILP64)'  (master)"
+            echo "EXPECT : FAIL — CMake FindBLAS either won't match the 'libopenblas64_' name, or if it"
+            echo "         does, blaspp's probe mangles to dgemm_ and won't link the dgemm_64_ symbols."
+            echo "         Either way, BLA_VENDOR is no substitute for PR #129's symbol-suffix handling."
+            echo "================================================================"
+          } > 09-conda-blavendor.log
+          cmake -B b09 -S blaspp-master -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_EXE_LINKER_FLAGS="$RPATH" \
+            -DBLA_VENDOR=OpenBLAS -DBLA_SIZEOF_INTEGER=8 -Dblas_int="int64_t (ILP64)" \
+            -Dbuild_tests=OFF -Dcolor=OFF >> 09-conda-blavendor.log 2>&1; rc=$?
+          if [ $rc -eq 0 ]; then cmake --build b09 -j >> 09-conda-blavendor.log 2>&1; rc=$?; fi
+          echo "----------------------------------------------------------------" >> 09-conda-blavendor.log
+          echo "cmake exit code: $rc  (non-zero = failed, as claimed)"  >> 09-conda-blavendor.log
+          ls b09/lib*blaspp* >> 09-conda-blavendor.log 2>&1
+
       - name: Summary (console pass/fail at a glance)
         if: always()
         run: |
-          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-bylib-master-FAILS 05-conda-pr129-WORKS 06-make-apt-configure-FAILS 07-make-conda-configure-FAILS; do
+          for f in 01-apt-master-FAILS 02-apt-bylib-WORKS 03-conda-master-FAILS 04-conda-bylib-master-FAILS 05-conda-pr129-WORKS 06-make-apt-configure-FAILS 07-make-conda-configure-FAILS 08-apt-blavendor 09-conda-blavendor; do
             echo "===== $f.log ====="
-            grep -E "requires a BLAS library and none was found|routine not found|could not be configured|none found|Built target blaspp|Found BLAS library" "$f.log" || echo "(marker not found)"
+            grep -E "requires a BLAS library and none was found|routine not found|could not be configured|none found|Built target blaspp|Found BLAS library|Found BLAS:|Using CMake's FindBLAS" "$f.log" || echo "(marker not found)"
           done
 
-      - name: Upload the four evidence logs
+      - name: Upload the evidence logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -198,4 +249,6 @@ jobs:
             05-conda-pr129-WORKS.log
             06-make-apt-configure-FAILS.log
             07-make-conda-configure-FAILS.log
+            08-apt-blavendor.log
+            09-conda-blavendor.log
           if-no-files-found: warn
